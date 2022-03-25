@@ -1,23 +1,15 @@
-# independent-test
+- 测试并记录uniapp独立分包下能力
 
-## Project setup
-```
-yarn install
-```
 
-### Compiles and hot-reloads for development
-```
-yarn serve
-```
-
-### Compiles and minifies for production
-```
-yarn build
-```
-
-### Customize configuration
-See [Configuration Reference](https://cli.vuejs.org/config/).
+# 使用
+- weui组件的使用方式 TODO 待补充说明
 
 
 
+# 能力限制
+- 当前构建独立分包时，不会复制引用的包外图片
+    - 通常对于图片使用：cdn + 小图（base64），所以暂不考虑更改包外图片路径
+- 不支持插件（框架对独立分包的限制）
 
+
+# questions for zhetengbiji
