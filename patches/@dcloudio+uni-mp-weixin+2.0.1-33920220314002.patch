@@ -1,0 +1,2020 @@
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/collect-dependency.js b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/collect-dependency.js
+new file mode 100644
+index 0000000..838b6f8
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/collect-dependency.js
+@@ -0,0 +1,173 @@
++const path = require('path');
++const fs = require('fs-extra');
++const htmlparser2 = require('htmlparser2');
++const { MpComponentFileExtension } = require('./constant');
++const { transformScript, resolveToContext } = require('./utils.js');
++const { parse } = require('@babel/parser');
++const { default: traverse } = require('@babel/traverse');
++
++class CollectDependency {
++    constructor (context, readFileSync, existsSync, addExtension) {
++        this.context = context;
++        this.existsSync = existsSync || fs.existsSync.bind(fs);
++        this.readFileSync = readFileSync || fs.readFileSync.bind(fs);
++        this.addExtension = addExtension;
++    }
++
++    getWxCssDeps (file) {
++        const deps = [];
++        const dirName = path.dirname(file);
++        let content = this.readFileSync(file, 'utf-8');
++        if (content instanceof Buffer) {
++            content = content.toString('utf-8');
++        }
++        const importRegExp = /@import\s*['"](.+)['"];*/g;
++        let matched;
++        while ((matched = importRegExp.exec(content)) !== null) {
++            if (!matched[1]) {
++                continue;
++            }
++            const wxssFile = resolveToContext(dirName, matched[1], this.context);
++            if (this.existsSync(wxssFile)) {
++                deps.push(wxssFile);
++            }
++        }
++        return deps;
++    };
++
++    getWxHtmlDeps (file) {
++        const deps = [];
++        const dirName = path.dirname(file);
++        let content = this.readFileSync(file, 'utf-8');
++        if (content instanceof Buffer) {
++            content = content.toString('utf-8');
++        }
++        // https://developers.weixin.qq.com/miniprogram/dev/reference/wxml/import.html
++        // WXML 提供两种文件引用方式import和include。
++        const targetTags = ['import', 'include', 'wxs'];
++        const existsSync = this.existsSync;
++        const htmlParser = new htmlparser2.Parser({
++            onopentag (name, attribs = {}) {
++                if (!targetTags.includes(name)) {
++                    return;
++                }
++                const { src } = attribs;
++                if (!src) {
++                    return;
++                }
++                const wxmlFile = resolveToContext(dirName, src, this.context);
++                console.log(wxmlFile);
++                if (existsSync(wxmlFile)) {
++                    deps.push(wxmlFile);
++                }
++            },
++        });
++        htmlParser.write(content);
++        htmlParser.end();
++        return deps;
++    }
++
++    getJsonDeps (file) {
++        const deps = [];
++        const dirName = path.dirname(file);
++        let fileContent = this.readFileSync(file);
++        if (fileContent && fileContent instanceof Buffer) {
++          fileContent = fileContent.toString('utf-8');
++        }
++        if (!fileContent || !(fileContent.trim())) {
++          return [];
++        }
++        fileContent = JSON.parse(fileContent);
++        const usingComponents = fileContent.usingComponents;
++        if (usingComponents && typeof usingComponents === 'object') {
++            Object.values(usingComponents).forEach((component) => {
++                component = resolveToContext(dirName, component, this.context);
++                // 每个组件都需要判断 js/json/wxml/wxss 文件是否存在
++                MpComponentFileExtension.forEach((ext) => {
++                    const file = this.addExtension(component, ext);
++                    if (this.existsSync(file)) {
++                        deps.push(file);
++                    }
++                });
++            });
++        }
++        return deps;
++    }
++
++    getJsDeps (file) {
++        const deps = [];
++        const dirName = path.dirname(file);
++        // 读取 js 文件内容
++        let content = this.readFileSync(file, 'utf-8');
++        if (content instanceof Buffer) {
++            content = content.toString('utf-8');
++        }
++        // 将代码转化为 AST
++        const ast = parse(content, { sourceType: 'module', plugins: ['exportDefaultFrom'] });
++        // 遍历 AST
++        traverse(ast, {
++            ImportDeclaration: ({ node }) => {
++                // 获取 import from 地址
++                const { value } = node.source;
++                const jsFile = transformScript(dirName, value, this.existsSync);
++                if (jsFile) {
++                    deps.push(jsFile);
++                }
++            },
++            Property: (nodePath) => {
++                const parentPath = nodePath.parentPath;
++                const callee = parentPath && parentPath.parent && parentPath.parent.callee;
++                if (!callee || callee.name !== 'Component') {
++                    return;
++                }
++                const relationsNodes = nodePath.container.filter(item => item.key.name === 'relations');
++                if (!relationsNodes.length) {
++                    return;
++                }
++                const relationsNode = relationsNodes[0];
++                const propertyNodes = relationsNode.value.properties || [];
++                let allRelationsComponents = propertyNodes.map(filePathNode => {
++                    if (!filePathNode.key.value) {
++                        return '';
++                    }
++                    return path.resolve(dirName, filePathNode.key.value);
++                });
++                allRelationsComponents = allRelationsComponents.filter(item => item);
++                allRelationsComponents.forEach(component => {
++                    MpComponentFileExtension.forEach((ext) => {
++                        const file = this.addExtension(component, ext);
++                        if (this.existsSync(file)) {
++                            deps.push(file);
++                        }
++                    });
++                });
++            },
++            ExportNamedDeclaration: ({ node }) => {
++                if (!node.source) {
++                    return;
++                }
++                // 获取 export from 地址
++                const { value } = node.source;
++                const jsFile = transformScript(dirName, value, this.existsSync);
++                if (jsFile) {
++                    deps.push(jsFile);
++                }
++            },
++            CallExpression: ({ node }) => {
++                if ((node.callee.name && node.callee.name === 'require') && node.arguments.length >= 1) {
++                    // 获取 require 地址
++                    const [{ value }] = node.arguments;
++
++                    const jsFile = transformScript(dirName, value, this.existsSync);
++                    if (jsFile) {
++                        deps.push(jsFile);
++                    }
++                }
++            },
++        });
++        return deps;
++    }
++
++}
++
++module.exports = CollectDependency;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/constant.js b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/constant.js
+new file mode 100644
+index 0000000..a2ca0af
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/constant.js
+@@ -0,0 +1,11 @@
++const WxMpFileExtension = {
++    js: 'js',
++    json: 'json',
++    wxml: 'wxml',
++    wxss: 'wxss',
++};
++
++module.exports = {
++    MpComponentFileExtension: Object.values(WxMpFileExtension),
++    WxMpFileExtension: Object.assign({}, WxMpFileExtension, { 'wxs': 'wxs' }),
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/index.js b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/index.js
+new file mode 100644
+index 0000000..44b596e
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/index.js
+@@ -0,0 +1,80 @@
++const fs = require('fs-extra');
++const path = require('path');
++const { addExtension } = require('./utils.js');
++const { MpComponentFileExtension, WxMpFileExtension } = require('./constant.js');
++const CollectDependency = require('./collect-dependency.js');
++
++const extToCollectMethodName = {
++    [WxMpFileExtension.js]: 'getJsDeps',
++    [WxMpFileExtension.wxs]: 'getJsDeps',
++    [WxMpFileExtension.wxss]: 'getWxCssDeps',
++    [WxMpFileExtension.wxml]: 'getWxHtmlDeps',
++    [WxMpFileExtension.json]: 'getJsonDeps',
++};
++
++class Depend {
++    constructor (context, readFileSync, existsSync) {
++        this.existsSync = existsSync || fs.existsSync.bind(fs);
++        this.readFileSync = readFileSync || fs.readFileSync.bind(fs);
++        this.componentLogicFiles = new Set();
++        this.files = new Set();
++        this.context = context;
++        this.allComponents = new Set();
++        this.collectDependency = new CollectDependency(context, this.readFileSync, this.existsSync, this.addExtension.bind(this));
++    }
++
++    addExtension (filePath, ext = '') {
++        if (ext === WxMpFileExtension.json) {
++            this.allComponents.add(filePath);
++        }
++        return `${filePath}.${ext}`;
++    }
++
++    // 将文件添加到树中
++    addToTree (filePath) {
++        filePath = path.resolve(filePath);
++        if (this.files.has(filePath)) {
++            return;
++        }
++        this.files.add(filePath);
++        const deps = this.getDeps(filePath) || [];
++        deps.forEach(dep => this.addToTree(dep));
++    }
++
++    getDeps (filePath) {
++        const extension = path.extname(filePath).slice(1);
++        const collectMethod = extToCollectMethodName[extension];
++        if (!collectMethod) {
++            return [];
++        }
++
++        const files = this.collectDependency[collectMethod](filePath);
++        const logicFiles = files.filter(filePath => filePath.endsWith(WxMpFileExtension.js));
++        logicFiles.forEach(logicFile => this.componentLogicFiles.add(logicFile));
++        return files;
++    }
++
++    getDepsByPageOrComponentPath (absPath) {
++        MpComponentFileExtension.forEach(ext => {
++            const filePath = this.addExtension(absPath, ext);
++            if (this.existsSync(filePath)) {
++                if (ext === WxMpFileExtension.js) {
++                    this.componentLogicFiles.add(filePath);
++                }
++                this.addToTree(filePath);
++            }
++        });
++    }
++
++    getDepsByComponents (components) {
++        components.forEach(page => {
++            // 获取绝对地址
++            const absPath = path.join(this.context, page);
++            this.getDepsByPageOrComponentPath(absPath);
++        });
++
++        return this.files;
++    }
++}
++
++module.exports = Depend;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/utils.js b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/utils.js
+new file mode 100644
+index 0000000..caa5d89
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/analyze-wxcomponent-dependency/utils.js
+@@ -0,0 +1,44 @@
++const path = require('path');
++const fs = require('fs-extra');
++
++module.exports = {
++    resolveToContext(dirName, relativePath, context) {
++        if (relativePath.startsWith('/')) {
++            return `${context}${relativePath}`;
++        }
++        return path.resolve(dirName, relativePath);
++    },
++    // 获取某个路径的脚本文件
++    transformScript: function (url, value, existsSync = fs.existsSync) {
++        url = `${url}/${value}`;
++        const ext = path.extname(url);
++        // 如果存在后缀，表示当前已经是一个文件
++        const exts = ['.js', '.wxs'];
++        if (exts.includes(ext) && existsSync(url)) {
++            return url;
++        }
++        // a/b/c => a/b/c.js
++        const jsFile = url + '.js';
++        if (existsSync(jsFile)) {
++            return jsFile;
++        }
++
++        // a/b/c => a/b/c.js
++        const wxsFile = url + '.wxs';
++        if (existsSync(wxsFile)) {
++            return wxsFile;
++        }
++
++        // a/b/c => a/b/c/index.js
++        const jsIndexFile = path.join(url, 'index.js');
++        if (existsSync(jsIndexFile)) {
++            return jsIndexFile;
++        }
++
++        const wxsIndexFile = path.join(url, 'index.wxs');
++        if (existsSync(wxsIndexFile)) {
++            return wxsIndexFile;
++        }
++        return null;
++    }
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/createIndependentPlugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/createIndependentPlugin.js
+new file mode 100644
+index 0000000..5a31662
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/createIndependentPlugin.js
+@@ -0,0 +1,37 @@
++const AddShareAbilityToRuntimePlugin = require('./independent-plugins/add-share-ability-to-runtime-plugin');
++const GenerateIndepndentEntryPlugin = require('./independent-plugins/generate-indepndent-entry-plugin');
++const InjectEntryJsToIndependentPlugin = require('./independent-plugins/inject-entry-to-independent-plugin');
++const InjectMainCssToIndependentCssPlugin = require('./independent-plugins/inject-main-css-to-independent-plugin');
++const RunDefaultAppPlugin = require('./independent-plugins/run-default-app-plugin');
++const SplitIndependentChunksPlugin = require('./independent-plugins/split-independent-chunks-plugin');
++const ModifyUniAppWebpackConfigPlugin = require('./independent-plugins/modify-uniapp-webpack-config-Plugin');
++const AddWxMpRuntimePlugin = require('./independent-plugins/add-weixin-mp-runtime-plugin');
++const AppInterceptorPlugin = require('./independent-plugins/app-interceptor-plugin');
++
++module.exports = function createIndependentPlugins () {
++    const manifestConfig = process.UNI_MANIFEST;
++    const weixinConfig = manifestConfig['mp-weixin'];
++    const independentSwitch = !!weixinConfig.independentSwitch;
++    if (!independentSwitch) return [];
++
++    // 支持构造微信小程序的独立分包
++    const independentPlugins = [
++        new SplitIndependentChunksPlugin(),
++        new ModifyUniAppWebpackConfigPlugin(), // 修改 webpack配置
++        new AddShareAbilityToRuntimePlugin(), // 保证独立分包和主包使用的相同的runtime.js
++        new GenerateIndepndentEntryPlugin(), // 生成独立分包执行入口文件（代替app.js
++        new InjectEntryJsToIndependentPlugin(), // 为独立分包注入执行入口
++        new RunDefaultAppPlugin(), // 确保app.js中的App()被执行一次
++        // 独立分包中 App,getApp 调用拦截
++        new AddWxMpRuntimePlugin(),
++        new AppInterceptorPlugin()
++    ];
++
++    const insertAppCssToIndependentSwitch = !!weixinConfig.insertAppCssToIndependentSwitch;
++    if (insertAppCssToIndependentSwitch) {
++        // 需要在 cacheSet 后面
++        independentPlugins.push(new InjectMainCssToIndependentCssPlugin()); // 目前只对页面注入了，组件未注入
++    }
++
++    return independentPlugins;
++};
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-share-ability-to-runtime-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-share-ability-to-runtime-plugin.js
+new file mode 100644
+index 0000000..9d79a15
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-share-ability-to-runtime-plugin.js
+@@ -0,0 +1,61 @@
++const { parse } = require('@babel/parser');
++const template = require('@babel/template');
++const generator = require('@babel/generator');
++const traverse = require('@babel/traverse');
++const { generateAsset } = require('./utils');
++
++// 【修改】runtime.js => 全局共享 global.webpackJsonP
++class AddShareAbilityToRuntimePlugin {
++    apply (compiler) {
++        compiler.hooks.emit.tapPromise('AddShareAbilityToRuntimePlugin', compilation => {
++            return new Promise((resolve, reject) => {
++                try {
++                    // debugger
++                    // 修改 runtime.js
++                    const runtimeChunkName = 'common/runtime.js';
++                    const commonRuntimeInfo = compilation.assets[runtimeChunkName];
++                    if (!commonRuntimeInfo) {
++                        resolve();
++                        return;
++                    }
++                    const commonRuntimeStrContent = commonRuntimeInfo.source();
++                    const commonRuntimeAst = parse(commonRuntimeStrContent);
++                    traverse.default(commonRuntimeAst, {
++                        AssignmentExpression (nodePath) {
++                            try {
++                                const leftNode = nodePath.node.left;
++                                if (leftNode.type === 'MemberExpression' && leftNode.object && leftNode.property) {
++                                    if (leftNode.object.name === 'global' && leftNode.property.value === 'webpackJsonp') {
++                                        const insertCode = 'if(global.webpackJsonp){ return };';
++                                        const astNode = template.statements(insertCode)();
++                                        const blockNode = nodePath.scope.block;
++                                        blockNode.body.body.unshift(...astNode);
++                                        nodePath.stop();
++                                    }
++                                }
++                            } catch (e) {
++                                console.error('independent.error', 'ShareRuntimeChunkPlugin', e);
++                            }
++                        },
++                    });
++
++                    const runtimeSource = generator.default(commonRuntimeAst).code;
++                    const runtimeAsset = generateAsset(runtimeSource);
++                    compilation.assets[runtimeChunkName] = runtimeAsset;
++                    Object.values(process.UNI_SUBPACKAGES).forEach(pkgInfo => {
++                        if (pkgInfo.independent) {
++                            compilation.assets[`${pkgInfo.root}/${runtimeChunkName}`] = runtimeAsset;
++                        }
++                    });
++
++                    resolve();
++                } catch (e) {
++                    console.error('independent.error', 'AddShareAbilityToRuntimePlugin', e);
++                    reject(e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = AddShareAbilityToRuntimePlugin;
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-weixin-mp-runtime-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-weixin-mp-runtime-plugin.js
+new file mode 100644
+index 0000000..a4d249f
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/add-weixin-mp-runtime-plugin.js
+@@ -0,0 +1,77 @@
++const fs = require('fs-extra');
++const path = require('path');
++const { generateAsset } = require('./utils');
++const t = require('@babel/types');
++const babelGenerator = require('@babel/generator');
++const babelParser = require('@babel/parser');
++const { default: babelTraverse } = require('@babel/traverse');
++const getWxMpRuntime = require('../runtime/index');
++
++// TODO 这个工作应该放在loader中做，后续优化
++class AddWxMpRuntimePlugin {
++  apply (compiler) {
++    compiler.hooks.emit.tapPromise('AddWxMpRuntimePlugin', compilation => {
++      return new Promise((resolve, reject) => {
++        try {
++          // 收集独立分包路径下面的所有js文件
++          // js文件都存储在 compilation.assets中 ， 因为需要注入 require(`${pkgRoot/common/index.js}`)
++
++          const thisCompilationAssets = compilation.assets;
++          const independentPkgsInfo = Object.values(process.UNI_SUBPACKAGES).filter(info => info.independent) || [];
++          const independentPkgRoots = independentPkgsInfo.map(info => `${info.root}`);
++          if (!independentPkgRoots.length) {
++            resolve();
++          }
++
++
++          const mpRuntimePath = getWxMpRuntime();
++          const wxMpRuntimeContent = fs.readFileSync(mpRuntimePath, 'utf8');
++
++          const ast = babelParser.parse(wxMpRuntimeContent, {
++            sourceType: 'module',
++            plugins: ['classProperties'],
++          });
++          babelTraverse(ast, {
++            VariableDeclaration (path) {
++              const v = path.node.declarations[0];
++              const name = v.id.name;
++              const value = v.init;
++              if (name === 'independentRoots' && t.isArrayExpression(value)) {
++                value.elements = independentPkgRoots.map(pkgRoot => t.StringLiteral(pkgRoot));
++              }
++            },
++          });
++          const { code } = babelGenerator.default(ast);
++          const runtimeAssetsInfo = generateAsset(code);
++          const mpRuntimeRelativePath = 'common/wxMpRuntime.js';
++
++          // 处理app.js
++          const appJsName = 'app.js';
++          thisCompilationAssets[mpRuntimeRelativePath] = runtimeAssetsInfo;
++          const assetInfo = thisCompilationAssets[appJsName];
++          if (!assetInfo) {
++            return resolve();
++          }
++          const content = assetInfo.source();
++          thisCompilationAssets[appJsName] = generateAsset(`require('./common/wxMpRuntime.js');${content}`);
++
++          // 处理独立分包
++          independentPkgRoots.forEach(pkgRoot => {
++            thisCompilationAssets[`${pkgRoot}/${mpRuntimeRelativePath}`] = runtimeAssetsInfo;
++            const entryJsName = `${pkgRoot}/common/index.js`;
++            const assetInfo = thisCompilationAssets[entryJsName];
++            let content = assetInfo.source();
++            content = generateAsset(`require('./wxMpRuntime.js');${content}`);
++            thisCompilationAssets[entryJsName] = content;
++          });
++          resolve();
++        } catch (e) {
++          console.error('AddWxMpRuntimePlugin', e);
++          reject(e);
++        }
++      });
++    });
++  }
++}
++
++module.exports = AddWxMpRuntimePlugin;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/app-interceptor-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/app-interceptor-plugin.js
+new file mode 100644
+index 0000000..c74ec57
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/app-interceptor-plugin.js
+@@ -0,0 +1,65 @@
++const t = require('@babel/types');
++const babelTraverse = require('@babel/traverse').default;
++const babelParser = require('@babel/parser');
++const babelGenerator = require('@babel/generator');
++const { generateAsset } = require('./utils');
++const { collectIndependentJsAssets } = require('./optimize-components-position/util');
++
++const visitor = {
++  CallExpression (path) {
++    const funNode = path.node;
++    // https://developers.weixin.qq.com/miniprogram/dev/reference/api/getApp.html
++    // FIX: 目前getApp仅支持一个参数(allowDefault)，如果后面增加更多的参数以下逻辑需要修改
++    // 增减判断是否有该参数逻辑
++
++    if (t.isIdentifier(path.node.callee)) {
++      const logicGlobal = '(Function("return this")())'
++      if (funNode.callee.name === 'getApp' && funNode.arguments.length === 0) {
++        funNode.callee = t.MemberExpression(t.Identifier(logicGlobal), t.Identifier('getApp'));
++      } else if (funNode.callee.name === 'App') {
++        funNode.callee = t.MemberExpression(t.Identifier(logicGlobal), t.Identifier('App'));
++      }
++    }
++  },
++};
++
++// 关键：需要在在整个emit阶段的最后（compilation.assets['/pages/chat-im/wxcomponents/...']
++class AppInterceptorPlugin {
++  apply (compiler) {
++    compiler.hooks.emit.tapPromise('AppInterceptorPlugin', compilation => {
++      return new Promise(resolve => {
++        // 收集独立分包路径下面的所有js文件
++        // js文件都存储在 compilation.assets中 ， 因为需要注入 require(`${pkgRoot/common/index.js}`)
++        const thisCompilationAssets = compilation.assets;
++        const independentJsAssets = collectIndependentJsAssets(thisCompilationAssets);
++        independentJsAssets.forEach(({ jsAssets }) => {
++          jsAssets.forEach(jsAssetName => {
++              if (jsAssetName.endsWith('common/wxMpRuntime.js')) {
++                  return;
++              }
++              const assetInfo = thisCompilationAssets[jsAssetName];
++              let assetSource = assetInfo.source();
++
++              // 有部分js文件在这里是Buffer类型
++              if (assetSource instanceof Buffer) {
++                assetSource = assetSource.toString();
++              }
++
++              const ast = babelParser.parse(assetSource, {
++                sourceType: 'module',
++                plugins: ['classProperties'],
++              });
++              babelTraverse(ast, visitor);
++              const { code } = babelGenerator.default(ast);
++              thisCompilationAssets[jsAssetName] = generateAsset(code);
++            }
++          );
++        });
++
++        resolve();
++      });
++    });
++  }
++}
++
++module.exports = AppInterceptorPlugin;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/generate-indepndent-entry-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/generate-indepndent-entry-plugin.js
+new file mode 100644
+index 0000000..713c2ce
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/generate-indepndent-entry-plugin.js
+@@ -0,0 +1,46 @@
++const crypto = require('crypto');
++const { generateAsset } = require('./utils');
++
++const emitFileCaches = {};
++
++function md5 (str) {
++    const hash = crypto.createHash('md5');
++    hash.update(str);
++    return hash.digest('hex');
++}
++
++function emitFile (filePath, source, compilation) {
++    const emitFileMD5 = md5(filePath + source);
++    if (emitFileCaches[filePath] !== emitFileMD5) {
++        emitFileCaches[filePath] = emitFileMD5;
++        compilation.assets[filePath] = generateAsset(source);
++    }
++}
++
++// 为独立分包【生成】入口执行文件，代替主包中的app.js
++class GenerateIndepndentEntryPlugin {
++    apply (compiler) {
++        compiler.hooks.emit.tapPromise('GenerateIndepndentEntryPlugin', compilation => {
++            return new Promise((resolve, reject) => {
++                try {
++                    // debugger
++                    const independentPkgs = Object.values(process.UNI_SUBPACKAGES).filter(subPkgItem => subPkgItem.independent) || [];
++                    const independentEntry = independentPkgs.map(independentPkgItem => {
++                        return {
++                            file: `${independentPkgItem.root}/common/index.js`,
++                            source: `require('runtime.js');require('library.js');require('vendor.js');require('main.js');`,
++                        };
++                    });
++                    independentEntry.forEach(({ file, source }) => emitFile(file, source, compilation));
++
++                    resolve();
++                } catch (e) {
++                    console.error('independent.error', 'GenerateIndepndentEntryPlugin', e);
++                    reject(e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = GenerateIndepndentEntryPlugin;
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-entry-to-independent-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-entry-to-independent-plugin.js
+new file mode 100644
+index 0000000..a199c59
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-entry-to-independent-plugin.js
+@@ -0,0 +1,36 @@
++const path = require('path');
++const { normalizePath, generateAsset } = require('./utils');
++
++// TODO 换个位置？
++// 独立分包的页面或者组件中【注入】 require('index.js') => 代替 app.js 功效
++class InjectEntryJsToIndependentPlugin {
++    apply (compiler) {
++        compiler.hooks.emit.tapPromise('InjectEntryJsToIndependentPlugin', compilation => {
++            return new Promise((resolve, reject) => {
++                try {
++                    // debugger
++                    Object.keys(process.UNI_SUBPACKAGES).forEach(root => {
++                        const pkgInfo = process.UNI_SUBPACKAGES[root];
++                        if (!pkgInfo.independent) return;
++                        const subPackageVendorPath = normalizePath(path.join(root, 'common'));
++                        Object.keys(compilation.assets).forEach(name => {
++                            // 是个js文件都需要加上（不限制组件或者页面
++                            if (path.extname(name) === '.js' && name.startsWith(root + '/') && !name.startsWith(subPackageVendorPath)) {
++                                const originalSource = compilation.assets[name].source();
++                                const entryRuntime = normalizePath(path.relative(path.dirname(name), subPackageVendorPath));
++                                const source = `require('${entryRuntime}/index.js');${originalSource}`;
++                                compilation.assets[name] = generateAsset(source);
++                            }
++                        });
++                    });
++                    resolve();
++                } catch (e) {
++                    console.error('independent.error', 'InjectEntryJsToIndependentPlugin', e);
++                    reject(e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = InjectEntryJsToIndependentPlugin;
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-main-css-to-independent-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-main-css-to-independent-plugin.js
+new file mode 100644
+index 0000000..f5326e7
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/inject-main-css-to-independent-plugin.js
+@@ -0,0 +1,139 @@
++const fs = require('fs-extra');
++const path = require('path');
++const { generateAsset } = require('./utils');
++const {
++    getIndependentPkgRoots,
++    getIndependentEntryPages
++} = require('@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/util');
++const { wxComponentsStr } = require('./optimize-components-position/constant');
++const weuiMiniprogramDir = 'weui-mp';
++
++function generateCssSource (pkgMainCssPath, pkgLibraryCssPath, wxssSourceInfo) {
++    const platforms = ['mp-weixin', 'mp-qq', 'mp-toutiao'];
++    const presetStyle = platforms.includes(process.env.UNI_PLATFORM) ? '[data-custom-hidden="true"],[bind-data-custom-hidden="true"]{display: none !important;}' : '';
++
++    const mainCssImport = pkgMainCssPath ? `@import '/${pkgMainCssPath}';` : '';
++    const libraryCssImport = pkgLibraryCssPath ? `@import '/${pkgLibraryCssPath}';` : '';
++    return `${mainCssImport}${libraryCssImport}
++    ${wxssSourceInfo.source()}
++    ${presetStyle}`;
++}
++
++function copyWeuiCssToIndependent (independentRoot) {
++    const weuiCssRelativePath = `wxcomponents/${weuiMiniprogramDir}/weui-wxss/dist/style/weui.wxss`;
++    const fromPath = path.resolve(process.env.UNI_INPUT_DIR, weuiCssRelativePath);
++    const toPath = path.resolve(process.env.UNI_OUTPUT_DIR, `${independentRoot}/${weuiCssRelativePath}`);
++    if (fs.existsSync(fromPath)) {
++        fs.copySync(fromPath, toPath);
++        return true;
++    } else {
++        console.warn('添加weui组件库到wxcomponents目录下');
++    }
++    return false;
++}
++
++function tryInsertWeuiCss (independentRoot, originalWxssStr) {
++    const manifestConfig = process.UNI_MANIFEST;
++    const weixinConfig = manifestConfig['mp-weixin'] || {};
++    const independentSwitch = !!weixinConfig.independentSwitch;
++    // 如果使用了weui，则需要注入weui样式
++    const useExtendedWeUi = !!(weixinConfig.useExtendedLib || {}).weui;
++
++    // 复制
++    const successOrNot = copyWeuiCssToIndependent(independentRoot);
++
++    const insertStr = `@import '/${independentRoot}/wxcomponents/${weuiMiniprogramDir}/weui-wxss/dist/style/weui.wxss'`;
++    return (successOrNot && useExtendedWeUi) ? `${insertStr};${originalWxssStr}` : originalWxssStr;
++}
++
++// 独立分包页面不受app.wxss影响
++// 独立分包中所有的页面需要导入main.wxss
++class InjectMainCssToIndependentCssPlugin {
++    apply (compiler) {
++        compiler.hooks.emit.tapPromise('InjectMainCssToIndependentCssPlugin', compilation => {
++            return new Promise((resolve, reject) => {
++                try {
++                    const thisCompilationAssets = compilation.assets;
++
++                    const indendentRoots = getIndependentPkgRoots();
++                    indendentRoots.forEach(indendentRoot => {
++                        
++                        let pkgMainCssPath = `${indendentRoot}/common/main.wxss`;
++                        let pkgLibraryCssPath = `${indendentRoot}/common/library.wxss`;
++
++                        if(!thisCompilationAssets[pkgMainCssPath]){
++                            pkgMainCssPath = '';
++                        }
++
++                        if(!thisCompilationAssets[pkgLibraryCssPath]){
++                            pkgLibraryCssPath = '';
++                        }
++
++                        const pkgPagesPath = getIndependentEntryPages(indendentRoot);
++                        // const cacheSet = new Set();
++                        // 获取所有页面和组件
++                        // findAllPagesAndComponentsByIndependentRoot(thisCompilationAssets, indendentRoot, pkgPagesPath, cacheSet);
++                        // const allPagesAndCompoents = [...cacheSet];
++
++                        // 关键，app.wxss和页面.wxss 对组件的影响是一样的。只需要注入到页面即可
++                        // 记：Component构造页面的化，不需要注入app.wxss。uniapp不存在该情况即页面均是通过Page构造，因此向页面注入
++                        // https://developers.weixin.qq.com/miniprogram/dev/framework/custom-component/wxml-wxss.html#%E7%BB%84%E4%BB%B6%E6%A0%B7%E5%BC%8F%E9%9A%94%E7%A6%BB
++                        pkgPagesPath.forEach(pageAndComponentPath => {
++                            if (pageAndComponentPath.startsWith('/')) {
++                                pageAndComponentPath = pageAndComponentPath.substring(1);
++                            }
++
++                            if (pageAndComponentPath.indexOf(wxComponentsStr) >= 0) {
++                                return;
++                            }
++                            const pageWxssPath = `${pageAndComponentPath}.wxss`;
++                            const wxssSourceInfo = thisCompilationAssets[pageWxssPath];
++                            if (!wxssSourceInfo) { // 有可能确实没有产出.wxss文件
++                                console.log('invalid wxssSourceInfo', pageAndComponentPath);
++                                return;
++                            }
++
++                            let wxssSource = generateCssSource(pkgMainCssPath, pkgLibraryCssPath, wxssSourceInfo);
++                            wxssSource = tryInsertWeuiCss(indendentRoot, wxssSource);
++                            thisCompilationAssets[pageWxssPath] = generateAsset(wxssSource);
++                        });
++                    });
++
++                    resolve();
++                } catch (e) {
++                    console.error('independent.error', 'InjectMainCssToIndependentCssPlugin', e);
++                    reject(e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = InjectMainCssToIndependentCssPlugin;
++
++
++//
++// function findAllPagesAndComponentsByIndependentRoot (thisCompilationAssets, independentRoot, pageOrComponents = [], cacheSet = new Set()) {
++//     pageOrComponents.forEach(pageOrComponentPath => {
++//         // 防止递归
++//         const recured = cacheSet.has(pageOrComponentPath);
++//         if (recured) return;
++//         cacheSet.add(pageOrComponentPath);
++//
++//         pageOrComponentPath = getNewComponentPathInIndependentPkg(independentRoot, pageOrComponentPath);
++//         if (pageOrComponentPath.startsWith('/')) {
++//             pageOrComponentPath = pageOrComponentPath.substring(1);
++//         }
++//         const pathWithSuffix = `${pageOrComponentPath}.json`;
++//         const assetInfo = thisCompilationAssets[pathWithSuffix]; // 原生组件的json文件在copy时保存到了 compilationAssets
++//         const jsonObj = assetInfo && JSON.parse(assetInfo.source().toString());
++//
++//         if (!jsonObj) {
++//             console.error('independent.error.recurIndependentJson', pageOrComponentPath);
++//             return;
++//         }
++//
++//         const usingComponents = Object.values(jsonObj.usingComponents || {});
++//         findAllPagesAndComponentsByIndependentRoot(thisCompilationAssets, independentRoot, usingComponents, cacheSet);
++//     });
++// }
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/modify-uniapp-webpack-config-Plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/modify-uniapp-webpack-config-Plugin.js
+new file mode 100644
+index 0000000..e860416
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/modify-uniapp-webpack-config-Plugin.js
+@@ -0,0 +1,10 @@
++class ModifyUniAppWebpackConfigPlugin {
++  apply (compiler) {
++    compiler.hooks.environment.tap('ModifyUniAppWebpackConfigPlugin', () => {
++      // 不注册webpack内置的splitchunksplugin
++      delete compiler.options.optimization.splitChunks;
++    });
++  }
++}
++
++module.exports = ModifyUniAppWebpackConfigPlugin;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/analyze.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/analyze.js
+new file mode 100644
+index 0000000..3884e63
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/analyze.js
+@@ -0,0 +1,112 @@
++const { wxComponentsStr } = require('./constant');
++const fs = require('fs-extra');
++const path = require('path');
++const { generateAsset } = require('./util');
++
++module.exports = class Analyze {
++    constructor (emitFileMap, AnalyzeWxcomponentDependency, compilation) {
++        this.emitFileMap = emitFileMap;
++        this.compilation = compilation;
++        this.AnalyzeWxcomponentDependency = AnalyzeWxcomponentDependency;
++    }
++
++    readFileSync (file) {
++        if (!file.startsWith(process.env.UNI_INPUT_DIR)) {
++            file = path.resolve(process.env.UNI_INPUT_DIR, file.substring(1, Number.MAX_SAFE_INTEGER));
++        }
++
++        const wxComponentAbsPath = `${process.env.UNI_INPUT_DIR}/${wxComponentsStr}`;
++        if (file.startsWith(wxComponentAbsPath)) {
++            return fs.readFileSync(file);
++        } else {
++            const assets = this.compilation.assets;
++            const pathWithoutRelative = path.resolve(file);
++            const relativePath = path.relative(process.env.UNI_INPUT_DIR, pathWithoutRelative);
++            const memoryFileInfo = assets[relativePath];
++            if (memoryFileInfo) {
++                return memoryFileInfo.source();
++            }
++            // 针对json文件，当前由 generate-json 发出，所以资源尚未同步到compilations.assets中
++            return JSON.stringify(this.emitFileMap.get(relativePath));
++        }
++    }
++
++    existsSync (file) {
++        // 类似补丁吧，传过来的路径可能不是/Users
++        if (!file.startsWith(process.env.UNI_INPUT_DIR)) {
++            file = path.resolve(process.env.UNI_INPUT_DIR, file.substring(1));
++        }
++        const wxComponentAbsPath = `${process.env.UNI_INPUT_DIR}/${wxComponentsStr}`;
++        if (file.startsWith(wxComponentAbsPath)) {
++            return fs.existsSync(file);
++        }
++        // vue组件的js文件忽略
++        // if (file.endsWith('.js')) {
++        //   return false;
++        // }
++
++        const assets = this.compilation.assets;
++        const pathWithoutRelative = path.resolve(file);
++        const relativePath = path.relative(process.env.UNI_INPUT_DIR, pathWithoutRelative);
++        // 针对json文件，当前由 generate-json 发出，所以资源尚未同步到compilations.assets中
++        if (relativePath.endsWith('.json')) {
++            return !!this.emitFileMap.get(relativePath);
++        }
++        return !!assets[relativePath];
++    }
++
++    findAllWxComponentsDependency (componentsPath, useMemoryCache = false) {
++        const context = process.env.UNI_INPUT_DIR;
++        let instance;
++        if (useMemoryCache) {
++            instance = new this.AnalyzeWxcomponentDependency(context, this.readFileSync.bind(this), this.existsSync.bind(this));
++        } else {
++            instance = new this.AnalyzeWxcomponentDependency(context);
++        }
++        return {
++            dependFiles: instance.getDepsByComponents(componentsPath),
++            allComponents: [...instance.allComponents],
++        };
++    }
++
++    copyWxComponent (pkgRoot, originalFilePath, targetPath) {
++        const thisCompilationAssets = this.compilation.assets;
++        const suffix = path.extname(originalFilePath);
++        if (!['.js', '.json', '.wxss'].includes(suffix)) {
++            return fs.copySync(originalFilePath, targetPath);
++        }
++        let jsonSource = fs.readFileSync(originalFilePath, 'utf8');
++        const assetPath = path.relative(process.env.UNI_OUTPUT_DIR, targetPath);
++
++        if (suffix === '.js') {
++            // 计算到 root/common/index 的相对路径
++            const relativeToDist = path.relative(path.dirname(assetPath), `${pkgRoot}/common/index.js`);
++            jsonSource = `require('${relativeToDist}');${jsonSource}`;
++            thisCompilationAssets[assetPath] = generateAsset(jsonSource);
++        }
++        // 后续需要更新组件引用路径，所以不采用文件复制方式
++        // json 后面需要修改包外组件引用路径：copy-outer-components-for-independent
++        // wxss 需要注入 全局样式：inject-main-css-to-independent-plugin
++        if (['.json', '.wxss'].includes(suffix)) {
++            thisCompilationAssets[assetPath] = generateAsset(jsonSource);
++        }
++    }
++
++    getDependFiles (obj, wxComponentFileDependencyCache, useMemoryCache = false) {
++        let tmpAllComponents = [];
++        for (const pkgRoot in obj) {
++            const wxComponents = [...obj[pkgRoot]];
++            wxComponents.forEach(wxComponent => {
++                if (!wxComponentFileDependencyCache[wxComponent]) {
++                    const {
++                        dependFiles,
++                        allComponents
++                    } = this.findAllWxComponentsDependency([wxComponent], useMemoryCache);
++                    tmpAllComponents = [...tmpAllComponents, ...allComponents];
++                    wxComponentFileDependencyCache[wxComponent] = dependFiles || [];
++                }
++            });
++        }
++        return new Set(tmpAllComponents);
++    }
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/constant.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/constant.js
+new file mode 100644
+index 0000000..ce720cc
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/constant.js
+@@ -0,0 +1,12 @@
++module.exports = {
++  appJsonFileName: 'app.json',
++  wxComponentsStr: 'wxcomponents',
++  weuiComponentStr: 'weui-miniprogram',
++  mainPkgName: 'mainPkg',
++  outerComponents: 'vueOuterComponents',
++  componentType: {
++    wxComponent: 'wxComponent',
++    vueComponent: 'vueComponent',
++    unknown: 'unknown'
++  }
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-outer-components-for-independent.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-outer-components-for-independent.js
+new file mode 100644
+index 0000000..3535988
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-outer-components-for-independent.js
+@@ -0,0 +1,229 @@
++const path = require('path');
++const Analyze = require('./analyze');
++const { wxComponentsStr, outerComponents, weuiComponentStr } = require('./constant');
++const { generateAsset } = require('./util');
++const {
++    collectAllOutSideComponentsMap,
++    getIndependentPkgRoots,
++    getIndependentEntryPages,
++    getGlobalComponentKeyByGlobalComponentPath,
++    copyAllWxComponentsFiles,
++    collectPkgCopyFiles,
++    getNewComponentPathInIndependentPkg,
++    getJsonByPageOrComponentPath
++} = require('./util');
++
++// 原则：原生组件不允许使用全局组件
++
++// 忽略原生组件(wxComponents)使用全局组件的情况
++
++function recurIndependentJson (independentRoot, independentPages, sourceRepo, handler, cacheSet = new Set()) {
++    independentPages.forEach(independentPage => {
++        // 避免无限递归
++        const recured = cacheSet.has(independentPage);
++        if (recured) return;
++
++        cacheSet.add(independentPage);
++
++        // 关键：映射到独立分包下面的组件路径
++        const newComponentPath = getNewComponentPathInIndependentPkg(independentRoot, independentPage);
++        const {
++            content: jsonObj, fromAssetsFlag
++        } = getJsonByPageOrComponentPath(newComponentPath, sourceRepo);
++        if (!jsonObj) {
++            console.error('independent.error.recurIndependentJson', newComponentPath);
++            return;
++        }
++
++        // 处理 newComponentPath.json 中的包外组件路径
++
++        const usingComponents = jsonObj.usingComponents || {};
++        for (let componentKey in usingComponents) {
++            const componentPath = usingComponents[componentKey];
++            if (componentPath.indexOf(weuiComponentStr) >= 0) {
++                continue;
++            }
++            handler(usingComponents, componentKey);
++            recurIndependentJson(independentRoot, [componentPath], sourceRepo, handler, cacheSet);
++        }
++
++        if (fromAssetsFlag) {
++            sourceRepo.compilationAssets[`${newComponentPath}.json`] = generateAsset(JSON.stringify(jsonObj));
++        }
++    });
++}
++
++// TODO watch 只针对发生变化的文件
++class Index extends Analyze {
++    init () {
++        const emitFileMap = this.emitFileMap;
++        const independentRoots = getIndependentPkgRoots();
++        const outSideComponentsMap = {}; // 引用的包外组件（vue组件和原生组件）
++        independentRoots.forEach(independentRoot => {
++            const independentPages = getIndependentEntryPages(independentRoot);
++            let cacheSet = new Set();
++            let cacheGlobalUsageMap = new Map();
++            // 收集包外组件
++            const collectOuterCompos = independentPage => collectAllOutSideComponentsMap(independentRoot, emitFileMap, independentPage, cacheSet, cacheGlobalUsageMap);
++            independentPages.forEach(collectOuterCompos);
++
++            // 如果是原生组件，则忽略wxComponents以外的组件
++            cacheSet = [...cacheSet].filter(componentPath => {
++                if (componentPath.startsWith('/')) {
++                    componentPath = componentPath.substring(1);
++                }
++                const isVueComponent = emitFileMap.get(`${componentPath}.json`);
++                const isWxComponent = componentPath.startsWith(`${wxComponentsStr}`);
++                // TODO weui组件
++                return !!(isVueComponent || isWxComponent);
++            });
++            // 暂时只收集包外的vue组件和原生组件（wxComponents)
++            outSideComponentsMap[independentRoot] = {
++                outerComponentSet: new Set(cacheSet),
++                globalComponentsMap: cacheGlobalUsageMap
++            };
++        });
++
++        // 独立分包使用到[全局组件]和[入口页面]作为[文件依赖分析]的入口
++        const componentFileCache = {};
++        for (let independentRoot in outSideComponentsMap) {
++            const info = outSideComponentsMap[independentRoot];
++            this.copyAndUpdateJson(independentRoot, info, componentFileCache);
++        }
++    }
++
++    copyAndUpdateJson (independentRoot, info, componentFileCache) {
++        const { outerComponentSet, globalComponentsMap } = info;
++        this.getDependFiles({ [independentRoot]: outerComponentSet }, componentFileCache, true);
++        // 1. 先复制
++        this.copyOuterComponents(independentRoot, outerComponentSet, componentFileCache);
++        // 2. 更新组件json中包外组件引用路径
++        this.updateIndependentJson(independentRoot, globalComponentsMap);
++    }
++
++    updateIndependentJson (independentRoot, globalComponentsMap) {
++        // 1. 先添加全局组件依赖
++        this.addGlobalComponentReference(independentRoot, globalComponentsMap);
++        // 2. 更新显示引用包外组件路径
++        this.updateOuterComponentReference(independentRoot);
++    }
++
++    // pages/chat-im/vueOuterComponents/components/navigation-bar.json mini-icon引用出错？
++    // 先处理全局组件：将全局组件引用添加到json文件中
++    // 整体思路：
++    // 1. 在init函数中，收集了独立分包用到的所有全局组件（包括包外组件用到的全局组件），
++    // 2. 保存全局组件被那些页面或者组件使用
++    // 3. 复制包外组件（全局组件只是包外组件的一部分）
++    // 4. 由于独立分包不能使用全局组件，所以该方法将全局组件路径添加到独立分包下的组件或页面关联的json文件中，确保可以访问到。
++    addGlobalComponentReference (independentRoot, globalComponentsMap) {
++        const globalComponentInfoMap = getGlobalComponentKeyByGlobalComponentPath();
++        for (let [globalComponentPath, componentSetWhoUsedGlobalCompo] of globalComponentsMap) {
++            // weui 暂时先不处理
++            if (globalComponentPath.indexOf(weuiComponentStr) >= 0) {
++                continue;
++            }
++
++            if (globalComponentPath.indexOf(weuiComponentStr) >= 0) {
++                continue;
++            }
++            const componentKey = globalComponentInfoMap[globalComponentPath];
++
++            if (globalComponentPath.startsWith('/')) {
++                globalComponentPath = globalComponentPath.substring(1);
++            }
++
++            const globalComponentReplacePath = getNewComponentPathInIndependentPkg(independentRoot, globalComponentPath);
++
++            if (globalComponentReplacePath === globalComponentPath) return; // 理论上不会走
++
++            const compilationAssets = this.compilation.assets;
++            // pages均为vue文件
++            [...componentSetWhoUsedGlobalCompo].forEach(componentWhoUsedGlobalCompo => {
++                // 获取在 independentRoot 目录下的新路径（独立分包内引用的包外组件也有可能用到全局组件，获取该包外组件在独立分包内的新路径）
++                componentWhoUsedGlobalCompo = getNewComponentPathInIndependentPkg(independentRoot, componentWhoUsedGlobalCompo);
++
++                // 获取该组件json文件内容
++                // 分包内的vue组件对应json存储在emitFileMap中
++                // 分包外vue组件由于前面的复制，内容保存在assets中
++                const {
++                    content: pageObj,
++                    fromAssetsFlag // json内容是否来自assets（还可能来自emiFileMap）
++                } = getJsonByPageOrComponentPath(componentWhoUsedGlobalCompo, {
++                    emitFileMap: this.emitFileMap, compilationAssets
++                });
++
++                const usingComponents = pageObj.usingComponents || {};
++                // 如果没有同名标签，则使用全局组件（优先使用显示声明的标签-针对同名标签）
++                if (!usingComponents[componentKey]) {
++                    usingComponents[componentKey] = `/${globalComponentReplacePath}`;
++                }
++
++                // 如果json内容来自emiFileMap（可能还没同步到assets上
++                // emitFileMap 后面会统一挂到assets上
++                if (!fromAssetsFlag) return;
++
++                delete pageObj.usingGlobalComponents
++                compilationAssets[`${componentWhoUsedGlobalCompo}.json`] = generateAsset(JSON.stringify(pageObj));
++            });
++        }
++    }
++
++    updateOuterComponentReference (independentRoot) {
++        const sourceRepo = {
++            emitFileMap: this.emitFileMap,
++            compilationAssets: this.compilation.assets
++        };
++        const independentPages = getIndependentEntryPages(independentRoot);
++        recurIndependentJson(independentRoot, independentPages, sourceRepo, (usingComponents, componentKey) => {
++            const componentPath = usingComponents[componentKey];
++            const newComponentPath = getNewComponentPathInIndependentPkg(independentRoot, componentPath);
++            if (newComponentPath && newComponentPath !== componentPath) {
++                usingComponents[componentKey] = `/${newComponentPath}`;
++            }
++        });
++    }
++
++    copyOuterComponents (independentRoot, outerComponentSet, componentFileCache) {
++        let copyFiles = collectPkgCopyFiles(outerComponentSet, componentFileCache);
++        const thisCompilationAssets = this.compilation.assets;
++        // TODO 组件依赖分许的时候需要记录 绝对路径（js/css/wxml） 进行模块引用的文件，输出后需要更改为相对路径，
++        copyAllWxComponentsFiles(independentRoot, copyFiles, (originalFilePath, targetPath, relativePath) => {
++            // 原生组件
++            if (relativePath.indexOf(wxComponentsStr) >= 0) {
++                return this.copyWxComponent(independentRoot, originalFilePath, targetPath);
++            }
++            // vue组件
++            const assetInfo = thisCompilationAssets[relativePath];
++            let assetSource = assetInfo && assetInfo.source();
++
++            // json文件此时还没有同步到 assets 上
++            if (!assetSource && relativePath.endsWith('.json')) {
++                assetSource = JSON.stringify(this.emitFileMap.get(relativePath));
++            }
++
++            if (!assetSource) {
++                console.error('independent.error', 'invalid assetSource');
++            }
++
++            const targetPrefix = `${independentRoot}/${outerComponents}`;
++            const targetJsAssetName = `${targetPrefix}/${relativePath}`;
++
++            if (relativePath.endsWith('.js')) {
++                const originalAsset = thisCompilationAssets[relativePath];
++                const originalSource = originalAsset && originalAsset.source;
++                // 见 generate-component
++                const __$wrappered = originalSource && originalSource.__$wrappered;
++                if (__$wrappered) {
++                    return;
++                }
++
++                const relativeToDist = path.relative(path.dirname(targetJsAssetName), `${independentRoot}/common/index.js`);
++                assetSource = `require('${relativeToDist}');${assetSource}`;
++            }
++
++            thisCompilationAssets[targetJsAssetName] = generateAsset(assetSource);
++        });
++    }
++}
++
++module.exports = Index;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/analyze-go-direction.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/analyze-go-direction.js
+new file mode 100644
+index 0000000..08b0e87
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/analyze-go-direction.js
+@@ -0,0 +1,55 @@
++const { mainPkgName } = require('../constant');
++
++function analyzeGoDirection (usageMap, appJson, emitFileMap) {
++  const copyComponentsForNormalPkgMap = {};
++  const copyComponentsForMainPkg = new Set();
++  const globalComponents = appJson.usingComponents || {};
++  for (const [originalWxComponentPath, usageInfo] of usageMap) {
++    const [pkgSet, pageOrComponentPaths] = usageInfo;
++    // 被主包用到 或者 被多个分包用到，则组件放置主包中
++    if (pkgSet.has(mainPkgName) || pkgSet.size > 1) {
++      copyComponentsForMainPkg.add(originalWxComponentPath);
++      continue;
++    }
++
++    // 到这里说明仅仅被一个普通分包使用，则将该组件复制到该普通分包中去
++    const pkgRoot = [...pkgSet][0];
++    const newComponentPath = `/${pkgRoot}${originalWxComponentPath}`;
++
++    if (!copyComponentsForNormalPkgMap[pkgRoot]) {
++      copyComponentsForNormalPkgMap[pkgRoot] = new Set();
++    }
++    copyComponentsForNormalPkgMap[pkgRoot].add(originalWxComponentPath);
++
++    // 当前组件是否是全局组件
++    const componentTagInGlobal = Object.keys(globalComponents).find(compoName => originalWxComponentPath === globalComponents[compoName]);
++
++    // 该组件 originalWxComponentPath 可能是以全局方式引入有可能是在json文件中声明引用
++    // 甚至可能是两种方式都存在，只是 tag 不一样
++    (pageOrComponentPaths || []).forEach(jsonFilePath => {
++      const jsonFileInfo = emitFileMap.get(jsonFilePath);
++
++      // 以全局方式引入该组件
++      if (componentTagInGlobal) {
++        delete globalComponents[componentTagInGlobal]; // 从全局组件配置中删除
++        jsonFileInfo.usingComponents[componentTagInGlobal] = newComponentPath; // 更新当前引用路径为分包路径
++      }
++
++      // 以json文件声明方式引入，则需要更新json文件声明的路径
++      const usingComponents = jsonFileInfo.usingComponents;
++      const componentTagInPage = Object.keys(usingComponents).find(compoName => originalWxComponentPath === usingComponents[compoName]);
++      if (componentTagInPage) {
++        jsonFileInfo.usingComponents[componentTagInPage] = newComponentPath;
++      }
++
++      if (componentTagInPage || componentTagInGlobal) {
++        const replaceInfo = `jsonFilePath: ${jsonFilePath}, originalWxComponentPath: ${originalWxComponentPath}, newComponentPath: ${newComponentPath}`;
++        // console.log(`replace componentPath used only by normal package, ${replaceInfo}`);
++      }
++
++    });
++  }
++  return { copyForNormal: copyComponentsForNormalPkgMap, copyForMain: { [mainPkgName]: copyComponentsForMainPkg } };
++}
++
++module.exports = analyzeGoDirection;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/collect-wx-component-used-status.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/collect-wx-component-used-status.js
+new file mode 100644
+index 0000000..22f6da2
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/collect-wx-component-used-status.js
+@@ -0,0 +1,44 @@
++// 遍历jsonFiles，根据文件路径前缀判断属于哪个包（vue组件完全基于路径划分包归属
++const { appJsonFileName, wxComponentsStr, mainPkgName } = require('../constant');
++const { getIndependentPkgRoots, getNormalPkgRoots } = require('../util');
++
++// 原生组件被主包和普通分包的使用情况
++function collectWxComponentUsedStatus (emitFileMap) {
++  const normalSubPkgRoots = getNormalPkgRoots();
++  const independentSubPkgRoots = getIndependentPkgRoots();
++
++  const usageByPkgMap = new Map();
++  for (const [jsonFileKey, jsonFileInfo] of emitFileMap) {
++    if (jsonFileKey === appJsonFileName) {
++      continue;
++    }
++
++    const explicitComponents = jsonFileInfo.usingComponents || {}; // 非全局组件
++    const usingGlobalWxComponents = jsonFileInfo.usingGlobalComponents || {};
++    // FIX 全局组件和直接引用的组件名称相同的情况
++    const currentAllComponents = Object.assign({}, usingGlobalWxComponents, explicitComponents);
++
++    // 忽略独立分包下面的组件或页面，即收集主包和普通分包的依赖情况
++    const findPkg = subPkgRoot => jsonFileKey.startsWith(subPkgRoot);
++    const independentPkgRoot = independentSubPkgRoots.find(findPkg);
++    // 忽略独立分包页面
++    if (independentPkgRoot) continue;
++
++    // 找出当前页面所属包（普通分包页面还是主包页面
++    const pkgName = normalSubPkgRoots.find(findPkg) || mainPkgName;
++
++    Object.keys(currentAllComponents).forEach(componentName => {
++      const componentPath = currentAllComponents[componentName];
++      if (componentPath.startsWith(`/${wxComponentsStr}`)) {
++        if (!usageByPkgMap.get(componentPath)) {
++          usageByPkgMap.set(componentPath, [new Set(), []]);
++        }
++        usageByPkgMap.get(componentPath)[0].add(pkgName);
++        usageByPkgMap.get(componentPath)[1].push(jsonFileKey);
++      }
++    });
++  }
++  return usageByPkgMap;
++}
++
++module.exports = collectWxComponentUsedStatus;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/index.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/index.js
+new file mode 100644
+index 0000000..e582ba1
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/copy-wx-components-on-demand/index.js
+@@ -0,0 +1,55 @@
++const collectWxComponentUsedStatus = require('./collect-wx-component-used-status');
++const processNormalPkg = require('./analyze-go-direction');
++const { collectPkgCopyFiles, copyAllWxComponentsFiles } = require('../util');
++const { wxComponentsStr, appJsonFileName, mainPkgName } = require('../constant');
++const Analyze = require('../analyze');
++
++// 仅仅针对 [主包]和[普通分包]用到[原生组件]进行按需加载
++class Index extends Analyze {
++  init () {
++    const emitFileMap = this.emitFileMap;
++    // 1. 获取app.json
++    const appJson = emitFileMap.get(appJsonFileName);
++
++    // 2. 获取每个原生组件（wxComponents）被各分包(主包和普通分包)的引用情况
++    const usageByPkgMap = collectWxComponentUsedStatus(emitFileMap, appJson);
++
++    // 3 处理主包和普通分包中的组件引用情况
++    const {
++      copyForNormal,
++      copyForMain,
++    } = processNormalPkg(usageByPkgMap, appJson, emitFileMap);
++
++    // 提示app.json中声明的未被使用的全局原生组件（wxcomponents)
++    const rootToWxComponents = Object.assign({}, copyForNormal, copyForMain);
++    const globalWxComponents = appJson.usingComponents || {};
++    const wxComponentPaths = [...copyForMain.mainPkg]
++
++    // 主包和普通分包用到的原生组件
++    Object.keys(globalWxComponents).forEach(globalWxComponentKey => {
++      const globalWxComponentPath = globalWxComponents[globalWxComponentKey];
++      const isWxComponents = globalWxComponentPath.startsWith(`/${wxComponentsStr}`);
++      if (isWxComponents && !wxComponentPaths.includes(globalWxComponentPath)) {
++        delete globalWxComponents[globalWxComponentKey];
++        // console.log(`global WxComponent(${globalWxComponentKey}) will be removed from global component`);
++      }
++    });
++
++    // 4. 经过3、4步骤获得每个分包引用的组件情况，对于每个wxcomponent进行依赖分析和提取
++    const fileCache = {};
++    this.getDependFiles(copyForNormal, fileCache);
++    this.getDependFiles(copyForMain, fileCache);
++
++    // 5.1 文件复制: 普通分包
++    Object.keys(copyForNormal).forEach(pkgRot => {
++      const copyFiles = collectPkgCopyFiles(copyForNormal[pkgRot], fileCache, 'normal pkg');
++      copyAllWxComponentsFiles(pkgRot, copyFiles);
++    });
++
++    // 5.2 文件复制: 主包
++    const mainPkgCopyFiles = collectPkgCopyFiles(copyForMain[mainPkgName], fileCache, 'normal pkg');
++    copyAllWxComponentsFiles('', mainPkgCopyFiles);
++  }
++}
++
++module.exports = Index;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/index.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/index.js
+new file mode 100644
+index 0000000..5549ed0
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/index.js
+@@ -0,0 +1,29 @@
++const CopyOuterComponentsForIndependent = require('./copy-outer-components-for-independent');
++const CopyWxComponentOnDemand = require('./copy-wx-components-on-demand');
++
++// @dcloudio/webpack-uni-mp-loader/lib/plugin/index-new.js
++// 需要在在上述插件之后执行（获取处理过的json
++class DependencyAnalyze {
++    // wxComponentDependencyAnalyzeHandle 分析微信原生组件的依赖情况
++    // 后面单独建一个仓库时，指定该类的协议，如需要提供getDepsByComponents方法
++    constructor () {
++        this.AnalyzeWxcomponentDependency = require('../../analyze-wxcomponent-dependency/index')
++    }
++
++    init (emitFileMap, compilation) {
++        const manifestConfig = process.UNI_MANIFEST;
++        const weixinConfig = manifestConfig['mp-weixin'] || {};
++        const independentSwitch = !!weixinConfig.independentSwitch;
++        const copyWxComponentsOnDemandSwitch = !!weixinConfig.copyWxComponentsOnDemandSwitch; // 默认值false
++
++        if (copyWxComponentsOnDemandSwitch) { // 开启按需复制
++            new CopyWxComponentOnDemand(emitFileMap, this.AnalyzeWxcomponentDependency, compilation).init();
++        }
++
++        if (independentSwitch) {
++            new CopyOuterComponentsForIndependent(emitFileMap, this.AnalyzeWxcomponentDependency, compilation).init();
++        }
++    }
++}
++
++module.exports = DependencyAnalyze;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/util.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/util.js
+new file mode 100644
+index 0000000..1a7e810
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/optimize-components-position/util.js
+@@ -0,0 +1,157 @@
++const path = require('path');
++const fs = require('fs-extra');
++const { getGlobalUsingComponents } = require('@dcloudio/uni-cli-shared/lib/cache');
++const { wxComponentsStr, outerComponents } = require('./constant');
++const { generateAsset } = require('../utils');
++
++function getGlobalComponentKeyByGlobalComponentPath () {
++  const globalUsingComponents = getGlobalUsingComponents();
++  const globalComponentInfoMap = {};
++  for (let componentKey in globalUsingComponents) {
++    const componentPath = globalUsingComponents[componentKey];
++    globalComponentInfoMap[componentPath] = componentKey;
++  }
++  return globalComponentInfoMap;
++}
++
++function getIndependentPkgRoots () {
++  return Object.values(process.UNI_SUBPACKAGES || []).filter(item => item.independent).map(item => item.root);
++}
++
++function getNormalPkgRoots () {
++  return Object.values(process.UNI_SUBPACKAGES || []).filter(item => !item.independent).map(item => item.root);
++}
++
++function getIndependentEntryPages (subPkgRoot) {
++  const subPages = [];
++  (Object.keys(process.UNI_SUB_PACKAGES_ROOT) || []).forEach(subPkgPagePath => {
++    const root = process.UNI_SUB_PACKAGES_ROOT[subPkgPagePath];
++    if (root === subPkgRoot) {
++      subPages.push(subPkgPagePath);
++    }
++  });
++  return subPages;
++}
++
++function getMainPkgPages () {
++  return (process.UNI_PAGES.pages || []).map(pageInfo => pageInfo.path);
++}
++
++function collectPkgCopyFiles (components, wxComponentFileDependencyCache, logPrefix = '') {
++  const allFiles = [];
++  components.forEach(component => {
++    // console.log(logPrefix, `copy component ${component}`);
++    const cacheFiles = wxComponentFileDependencyCache[component] || [];
++    allFiles.push(...cacheFiles);
++  });
++  return allFiles;
++}
++
++function copyAllWxComponentsFiles (key, files = [], copyHandler) {
++  const targetPathPrefix = `${process.env.UNI_OUTPUT_DIR}/${key}/`;
++  files.forEach(originalFilePath => {
++    const relativePath = path.relative(process.env.UNI_INPUT_DIR, originalFilePath);
++    const targetPath = path.resolve(targetPathPrefix, relativePath);
++    if (copyHandler) {
++      return copyHandler(originalFilePath, targetPath, relativePath);
++    }
++    fs.copySync(originalFilePath, targetPath);
++  });
++}
++
++// 不带 首杠
++function getNewComponentPathInIndependentPkg (independentRoot, componentPath) {
++  // 相对路径不处理
++  if (componentPath.startsWith('.')) {
++    return componentPath;
++  }
++  if (componentPath.startsWith('/')) {
++    componentPath = componentPath.substring(1);
++  }
++  if (componentPath.startsWith(`${independentRoot}`)) {
++    return componentPath;
++  }
++  let pathPrefix = `${independentRoot}/`;
++  if (componentPath.indexOf(wxComponentsStr) >= 0) {
++    return `${pathPrefix}${componentPath}`;
++  }
++  return `${pathPrefix}${outerComponents}/${componentPath}`;
++}
++
++// 收集用到的所有包外组件
++function collectAllOutSideComponentsMap (independentRoot, emitFileMap, entryPage, cacheForAll = new Set(), cacheForGlobal = new Map()) {
++  if (entryPage.startsWith('/')) {
++    entryPage = entryPage.substring(1);
++  }
++  const jsonFileInfo = emitFileMap.get(`${entryPage}.json`);
++  if (!jsonFileInfo) { // 只看vue组件
++    return;
++  }
++  const explicitComponents = jsonFileInfo.usingComponents || {}; // 非全局组件
++  const usingGlobalComponents = jsonFileInfo.usingGlobalComponents || {}; // 全局组件（忽略原生组件引用全局组件的场景）
++  const allUsingComponents = Object.assign({}, usingGlobalComponents, explicitComponents);
++  const allComponentsPath = Object.values(allUsingComponents);
++  const globalComponents = Object.values(usingGlobalComponents);
++
++  allComponentsPath.forEach(componentPath => {
++    if (!componentPath.startsWith(`/${independentRoot}`)) {
++      cacheForAll.add(componentPath);
++    }
++
++    // 全局组件
++    if (globalComponents.includes(componentPath)) {
++      const originalSet = cacheForGlobal.get(componentPath);
++      const pageSet = originalSet || new Set();
++      if (!originalSet) {
++        cacheForGlobal.set(componentPath, pageSet);
++      }
++      pageSet.add(entryPage);
++    }
++
++    collectAllOutSideComponentsMap(independentRoot, emitFileMap, componentPath, cacheForAll, cacheForGlobal);
++  });
++}
++
++function getJsonByPageOrComponentPath (pageOrComponentPath, sourceRepo) {
++  const { emitFileMap, compilationAssets } = sourceRepo;
++  if (pageOrComponentPath.startsWith('/')) {
++    pageOrComponentPath = pageOrComponentPath.substring(1);
++  }
++  const pathWithSuffix = `${pageOrComponentPath}.json`;
++  const assetInfo = compilationAssets[pathWithSuffix]; // 原生组件的json文件在copy时保存到了 compilationAssets
++  const jsonObj = assetInfo && JSON.parse(assetInfo.source().toString());
++
++  try {
++    return {
++      content: emitFileMap.get(pathWithSuffix) || jsonObj,
++      fromAssetsFlag: !!jsonObj
++    };
++  } catch (e) {
++    console.error('util', e);
++  }
++}
++
++function collectIndependentJsAssets (compilationAssets) {
++  const independentPkgRoots = getIndependentPkgRoots();
++  const jsAssets = Object.keys(compilationAssets).filter(assetName => assetName.endsWith('.js'));
++  return independentPkgRoots.map(independentRoot => {
++    return {
++      independentRoot, jsAssets: jsAssets.filter(assetName => assetName.startsWith(independentRoot)) || [],
++    };
++  });
++}
++
++module.exports = {
++  getJsonByPageOrComponentPath,
++  getNewComponentPathInIndependentPkg,
++  collectIndependentJsAssets,
++  getGlobalComponentKeyByGlobalComponentPath,
++  getNormalPkgRoots,
++  getIndependentPkgRoots,
++  getIndependentEntryPages,
++  getMainPkgPages,
++  copyAllWxComponentsFiles,
++  collectPkgCopyFiles,
++  collectAllOutSideComponentsMap,
++  generateAsset
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/readme.md b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/readme.md
+new file mode 100644
+index 0000000..fa2751a
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/readme.md
+@@ -0,0 +1,3 @@
++TODO
++- AddWxMpRuntimePlugin & AppInterceptorPlugin
++- app.wxss 内容不完全一样 （page
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/run-default-app-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/run-default-app-plugin.js
+new file mode 100644
+index 0000000..74621bb
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/run-default-app-plugin.js
+@@ -0,0 +1,32 @@
++const path = require('path');
++const { generateAsset } = require('./utils');
++
++// App() 必须在 app.js 中调用，必须调用且只能调用一次。不然会出现无法预期的后果。
++class RunDefaultAppPlugin {
++    apply (compiler) {
++        compiler.hooks.emit.tapPromise('RunDefaultAppPlugin', compilation => {
++            return new Promise((resolve, reject) => {
++                try {
++                    // debugger
++                    const appJsInfo = compilation.assets["app.js"];
++                    if (!appJsInfo) {
++                        console.error('independent.error', 'invalid runDefaultApp');
++                        resolve();
++                        return;
++                    }
++                    const appSource = appJsInfo.source();
++                    // App() 必须在 app.js 中调用，必须调用且只能调用一次。不然会出现无法预期的后果。
++                    const runApp = 'if(getApp && !getApp()){ App({}) }';
++                    compilation.assets["app.js"] = generateAsset(`${appSource};${runApp}`);
++
++                    resolve();
++                } catch (e) {
++                    console.error('independent.error', 'RunDefaultAppPlugin', e);
++                    reject(e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = RunDefaultAppPlugin;
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/split-independent-chunks-plugin.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/split-independent-chunks-plugin.js
+new file mode 100644
+index 0000000..b3bd277
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/split-independent-chunks-plugin.js
+@@ -0,0 +1,261 @@
++const GraphHelpers = require('webpack/lib/GraphHelpers');
++const { normalizePath } = require('@dcloudio/uni-cli-shared');
++const getSplitChunks = require('@dcloudio/vue-cli-plugin-uni/lib/split-chunks');
++const path = require('path');
++
++const mainPath = normalizePath(path.resolve(process.env.UNI_INPUT_DIR, 'main.'));
++const mainPkgName = 'mainPkg';
++
++function getAllEntryPointOfChunkGroup (chunkGroup, entryPointSet) {
++    if (chunkGroup.isInitial()) {
++        return entryPointSet.add(chunkGroup);
++    }
++
++    const parentChunkGroups = [...chunkGroup.parentsIterable];
++    parentChunkGroups.forEach(parentChunkGroup => getAllEntryPointOfChunkGroup(parentChunkGroup, entryPointSet));
++}
++
++function getChunkToEntryPointsMap (allChunks) {
++    const chunkToEntryPointsMap = new Map();
++    allChunks.forEach(chunkItem => {
++        const chunkGroups = [...chunkItem.groupsIterable];
++        const tmpEntryPointSet = new Set();
++        chunkToEntryPointsMap.set(chunkItem, tmpEntryPointSet);
++        chunkGroups.forEach(chunkGroup => {
++            getAllEntryPointOfChunkGroup(chunkGroup, tmpEntryPointSet);
++        });
++    });
++    return chunkToEntryPointsMap;
++}
++
++function baseTest (module) {
++    if (module.type === 'css/mini-extract') {
++        return false;
++    }
++    if (module.resource) {
++        const resource = normalizePath(module.resource);
++        if (
++            resource.indexOf('.vue') !== -1 ||
++            resource.indexOf('.nvue') !== -1 ||
++            resource.indexOf(mainPath) === 0 // main.js
++        ) {
++            return false;
++        }
++    }
++    return true;
++}
++
++class SplitHandler {
++    constructor (chunks = [], compilation, cacheGroups, chunkFilter, removeModuleFromChunkFilter = () => true) {
++        this.chunks = chunks || [];
++        this.chunkFilter = chunkFilter;
++        this.cacheGroups = cacheGroups;
++        this.compilation = compilation;
++        this.removeModuleFromChunkFilter = removeModuleFromChunkFilter;
++
++        this.chunksInfoMap = new Map();
++    }
++
++    addModuleToChunksInfoMap (module, chunks, newChunkName) {
++        let info = this.chunksInfoMap.get(newChunkName);
++        if (!info) {
++            info = {
++                modules: new Set(),
++                chunks: new Set(),
++            };
++            this.chunksInfoMap.set(newChunkName, info);
++        }
++        info.modules.add(module);
++        chunks.forEach(chunk => info.chunks.add(chunk));
++    }
++
++    checkTest (module, test) {
++        if (typeof test === 'function') {
++            if (test(module, module.getChunks())) {
++                return true;
++            }
++        } else if (test instanceof RegExp) {
++            if (module.nameForCondition && test.test(module.nameForCondition())) {
++                return true;
++            }
++            for (const chunk of module.getChunks()) {
++                if (chunk.name && test.test(chunk.name)) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    }
++
++    getHitCacheGroups (module) {
++        const hitCacheGroups = [];
++        const cacheGroups = this.cacheGroups;
++        for (const key of Object.keys(cacheGroups)) {
++            const cacheInfo = cacheGroups[key];
++            if (!cacheInfo) {
++                continue;
++            }
++            if (this.checkTest(module, cacheInfo.test)) {
++                hitCacheGroups.push({ newChunkName: cacheInfo.name, priority: cacheInfo.priority || 0 });
++            }
++        }
++        if (hitCacheGroups.length) {
++            return hitCacheGroups.sort((b, a) => a.priority - b.priority)[0];
++        }
++        return null;
++    }
++
++    start () {
++        const allModulesSet = new Set();
++        this.chunks.forEach(chunk => {
++            chunk.getModules().forEach(module => allModulesSet.add(module));
++        });
++        this.splitHandler([...allModulesSet]);
++    }
++
++    filter (module) {
++        // 获取chunks和this.chunks的交集部分
++        const filterOne = this.chunks.filter(targetChunk => module.chunksIterable.has(targetChunk)) || [];
++        // 处理uniapp提供的过滤，见split-chunks文件
++        return filterOne.filter(this.chunkFilter);
++    }
++
++    splitHandler (allModulesUsedByIndependent) {
++        // 遍历独立分包中用到的模块，测试其所在的cacheGroup
++        // 每个模块在这里至多会生成或加入到一个newChunk中
++        for (const module of allModulesUsedByIndependent) {
++            const hitGroup = this.getHitCacheGroups(module);
++            if (!hitGroup) {
++                continue;
++            }
++            this.addModuleToChunksInfoMap(module, this.filter(module), hitGroup.newChunkName);
++        }
++
++        // 遍历 chunksInfoMap
++        for (const [chunkName, newChunkInfo] of this.chunksInfoMap) {
++            const newChunk = this.compilation.addChunk(chunkName);
++            newChunk.chunkReason = 'split chunk for independent';
++            for (const module of newChunkInfo.modules) {
++                if (module.rawRequest && module.rawRequest.indexOf('wx-recorder-manager') >= 0) {
++                    // console.log('sunqing');
++                }
++                GraphHelpers.connectChunkAndModule(newChunk, module);
++                [...newChunkInfo.chunks].forEach(chunk => {
++                    if (this.removeModuleFromChunkFilter(chunk)) {
++                        chunk.removeModule(module);
++                        chunk.split(newChunk);
++                    }
++                });
++            }
++        }
++    }
++}
++
++class SplitIndependentChunksPlugin {
++    generateCacheGroups () {
++        const cacheGroups = {};
++        Object.keys(process.UNI_SUBPACKAGES).forEach(root => {
++            const pkgInfo = process.UNI_SUBPACKAGES[root];
++            if (pkgInfo.independent) {
++                cacheGroups[root] = {
++                    [root + '/commonsVendor']: {
++                        test: /[\\/]node_modules[\\/]/,
++                        minSize: 0,
++                        minChunks: 1,
++                        name: normalizePath(path.join(root, 'common/library')),
++                        priority: 2,
++                        chunks: 'all',
++                    },
++                    [root + '/commons']: {
++                        priority: 1,
++                        name: normalizePath(path.join(root, 'common/vendor')),
++                        test: (module) => {
++                            if (!baseTest(module)) {
++                                return false;
++                            }
++                            return true;
++                        },
++                    },
++                };
++            }
++        });
++
++        const splitChunkConfig = getSplitChunks();
++        cacheGroups[mainPkgName] = splitChunkConfig.cacheGroups;
++        return { cacheGroups, chunkFilter: splitChunkConfig.chunks };
++    }
++
++    apply (compiler) {
++        compiler.hooks.thisCompilation.tap('SplitIndependentChunksPlugin', compilation => {
++            compilation.hooks.optimizeChunksAdvanced.tap('SplitIndependentChunksPlugin', chunks => {
++                try {
++                    const independentPkgRoot = Object.values(process.UNI_SUBPACKAGES).filter(rootInfo => rootInfo.independent).map(rootInfo => rootInfo.root);
++                    const allPkgRootMap = {};
++                    const mainPkgChunks = [];
++                    for (const chunk of chunks) {
++                        const chunkName = chunk.name;
++                        if (!chunkName) {
++                            continue;
++                        }
++                        const root = independentPkgRoot.find(root => chunkName.startsWith(root));
++                        if (!root) {
++                            mainPkgChunks.push(chunk);
++                            continue;
++                        }
++                        if (!allPkgRootMap[root]) {
++                            allPkgRootMap[root] = [];
++                        }
++                        allPkgRootMap[root].push(chunk);
++                    }
++
++                    const { cacheGroups, chunkFilter } = this.generateCacheGroups(compiler);
++                    // 找出chunk所有的entryPoint
++                    const chunkToEntryPointsMap = getChunkToEntryPointsMap(compilation.chunks);
++                    const allChunksUsedByIndependentMap = {};
++                    for (const pkgRoot in allPkgRootMap) {
++                        if (!allChunksUsedByIndependentMap[pkgRoot]) {
++                            allChunksUsedByIndependentMap[pkgRoot] = new Set();
++                        }
++
++                        for (const [chunkItem, entryPointSet] of chunkToEntryPointsMap) {
++                            const filter = entryPoint => entryPoint.name.startsWith(pkgRoot);
++                            const referenceByPkgRoot = [...entryPointSet].find(filter);
++                            // 当前chunk中存在模块被该独立分包下面的页面引用
++                            // uniapp的entry: main.js + page.vue
++                            if (referenceByPkgRoot) {
++                                allChunksUsedByIndependentMap[pkgRoot].add(chunkItem);
++                            }
++                        }
++                    }
++
++                    // 先分离独立分包
++                    for (const pkgRoot in allPkgRootMap) {
++                        const chunksOfIndependentPkg = allPkgRootMap[pkgRoot];
++                        // 需要将独立分包中用到外部js模块拆分一份到 pkgRoot/vendor.js 中
++                        const allChunksUsedByIndependent = [...allChunksUsedByIndependentMap[pkgRoot]];
++                        // 收集独立分包下面的所有chunks：包内chunks + 包外chunks(主要引用的包外组件)
++                        const outSideChunks = [];
++                        allChunksUsedByIndependent.forEach(chunkItem => {
++                            if (!chunksOfIndependentPkg.includes(chunkItem)) {
++                                outSideChunks.push(chunkItem);
++                            }
++                        });
++
++                        new SplitHandler([...allChunksUsedByIndependent], compilation, cacheGroups[pkgRoot], chunkFilter, (chunk) => {
++                            if (outSideChunks.includes(chunk)) {
++                                return false;
++                            }
++                            return true;
++                        }).start();
++                    }
++                    // 再分离普通分包和主包
++                    new SplitHandler(mainPkgChunks, compilation, cacheGroups[mainPkgName], chunkFilter).start();
++                } catch (e) {
++                    console.error('independent.error', 'SplitIndependentChunksPlugin', e);
++                }
++            });
++        });
++    }
++}
++
++module.exports = SplitIndependentChunksPlugin;
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/utils.js b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/utils.js
+new file mode 100644
+index 0000000..aebe67a
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/independent-plugins/utils.js
+@@ -0,0 +1,16 @@
++const isWin = /^win/.test(process.platform);
++const normalizePath = path => (isWin ? path.replace(/\\/g, '/') : path);
++
++module.exports = {
++  normalizePath,
++  generateAsset (stringSource) {
++    return {
++      size () {
++        return Buffer.byteLength(stringSource, 'utf8');
++      },
++      source () {
++        return stringSource;
++      },
++    };
++  },
++};
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/index.js b/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/index.js
+new file mode 100644
+index 0000000..e71815c
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/index.js
+@@ -0,0 +1,4 @@
++const path = require('path');
++module.exports = function () {
++    return path.resolve(__dirname) + '/wxMpRuntime.js';
++};
+\ No newline at end of file
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/wxMpRuntime.js b/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/wxMpRuntime.js
+new file mode 100644
+index 0000000..9bcd564
+--- /dev/null
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/runtime/wxMpRuntime.js
+@@ -0,0 +1,37 @@
++
++const logicGlobal = Function("return this")();
++if (!logicGlobal.wpRuntimeInited) {
++  logicGlobal.wpRuntimeInited = true;
++  // https://developers.weixin.qq.com/miniprogram/dev/reference/api/App.html
++  // 注册小程序。接受一个 Object 参数，其指定小程序的生命周期回调等。
++  // App() 必须在 app.js 中调用，必须调用且只能调用一次。不然会出现无法预期的后果。
++  const independentRoots = []; // 变量名不能更改，插件通过该名来静态替换值
++
++  Object.assign(logicGlobal, {
++    getApp: function () {
++      return getApp() || getApp({ allowDefault: true });
++    },
++    App: function (appOpts = {}) {
++      const launchOptions = wx.getLaunchOptionsSync();
++      const entryPath = launchOptions.path || '';
++      const isIndependentPage = independentRoots.find(pkgRoot => entryPath.startsWith(pkgRoot));
++
++      // 实际上也可以不区分
++      if (!isIndependentPage) {
++        return App(appOpts);
++      }
++
++      // TODO 部分App上面挂载的东西 未提供api形式，这里可能不支持
++      // 目前只针对云医用到的生命周期进行支持
++      const app = this.getApp();
++      // const { onLaunch, onShow, onHide, onError, onUnhandledRejection, onThemeChange } = appOpts;
++      Object.assign(app, appOpts);
++      app.onLaunch(launchOptions);
++      wx.onAppShow(opts => app.onShow(opts));
++      wx.onAppHide(opts => app.onHide(opts));
++      wx.onError(opts => app.onError(opts));
++      wx.onUnhandledRejection(opts => app.onUnhandledRejection(opts));
++      wx.onThemeChange(opts => app.onThemeChange(opts));
++    },
++  });
++}
+diff --git a/node_modules/@dcloudio/uni-mp-weixin/lib/uni.config.js b/node_modules/@dcloudio/uni-mp-weixin/lib/uni.config.js
+index 8ffbc50..7989800 100644
+--- a/node_modules/@dcloudio/uni-mp-weixin/lib/uni.config.js
++++ b/node_modules/@dcloudio/uni-mp-weixin/lib/uni.config.js
+@@ -42,13 +42,20 @@ module.exports = {
+     const workers = platformOptions.workers
+     workers && copyOptions.push(workers)
+ 
+-    const wxcomponentsDir = path.resolve(process.env.UNI_INPUT_DIR, COMPONENTS_DIR_NAME)
+-    if (fs.existsSync(wxcomponentsDir)) {
+-      copyOptions.push({
+-        from: wxcomponentsDir,
+-        to: COMPONENTS_DIR_NAME,
+-        ignore: ['**/*.vue', '**/*.css'] // v3 会自动转换生成vue,css文件，需要过滤
+-      })
++
++    const manifestConfig = process.UNI_MANIFEST;
++    const weixinConfig = manifestConfig['mp-weixin'] || {};
++    const copyWxComponentsOnDemandSwitch = !!weixinConfig.copyWxComponentsOnDemandSwitch; // 默认值false
++
++    if (!copyWxComponentsOnDemandSwitch) {
++      const wxcomponentsDir = path.resolve(process.env.UNI_INPUT_DIR, COMPONENTS_DIR_NAME)
++      if (fs.existsSync(wxcomponentsDir)) {
++        copyOptions.push({
++          from: wxcomponentsDir,
++          to: COMPONENTS_DIR_NAME,
++          ignore: ['**/*.vue', '**/*.css'] // v3 会自动转换生成vue,css文件，需要过滤
++        })
++      }
+     }
+     global.uniModules.forEach(module => {
+       const wxcomponentsDir = path.resolve(process.env.UNI_INPUT_DIR, 'uni_modules', module, COMPONENTS_DIR_NAME)

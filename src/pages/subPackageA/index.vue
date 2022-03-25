@@ -1,7 +1,7 @@
 <template>
   <view class="content">
-    首页
-    <image class="logo" src="/static/logo.png" @click="routeToPageA"></image>
+    分包页面A
+    <image class="logo" src="/static/logo.png" @click="routeToPageB"> </image>
     <view>
       <text class="title">{{ title }}</text>
     </view>
@@ -9,18 +9,20 @@
 </template>
 
 <script>
+
 export default {
   data () {
     return {
-      title: 'Hello root.index',
+      title: 'Hello subpackage.A',
     };
   },
   onLoad () {
+
   },
   methods: {
-    routeToPageA(){
+    routeToPageB(){
       wx.navigateTo({
-        url:'/pages/subPackageA/index'
+        url:'/pages/subPackageB/index'
       })
     }
   },

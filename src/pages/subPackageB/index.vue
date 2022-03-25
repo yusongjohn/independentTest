@@ -1,6 +1,6 @@
 <template>
   <view class="content">
-    首页
+    分包页面A
     <image class="logo" src="/static/logo.png" @click="routeToPageA"></image>
     <view>
       <text class="title">{{ title }}</text>
@@ -9,13 +9,15 @@
 </template>
 
 <script>
+
 export default {
   data () {
     return {
-      title: 'Hello root.index',
+      title: 'Hello subpackage.B',
     };
   },
   onLoad () {
+    const app = getApp()
   },
   methods: {
     routeToPageA(){

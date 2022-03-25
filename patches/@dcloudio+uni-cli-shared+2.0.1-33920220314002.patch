@@ -1,0 +1,55 @@
+diff --git a/node_modules/@dcloudio/uni-cli-shared/lib/cache.js b/node_modules/@dcloudio/uni-cli-shared/lib/cache.js
+index e2f2765..b6df3c2 100644
+--- a/node_modules/@dcloudio/uni-cli-shared/lib/cache.js
++++ b/node_modules/@dcloudio/uni-cli-shared/lib/cache.js
+@@ -104,8 +104,12 @@ function updateComponentJson (name, jsonObj, usingComponents = true, type = 'Com
+ }
+ 
+ function updateUsingGlobalComponents (name, usingGlobalComponents) {
+-  if (supportGlobalUsingComponents) {
+-    return
++  const manifestConfig = process.UNI_MANIFEST;
++  const weixinConfig = manifestConfig['mp-weixin'];
++  const independentSwitch = !!weixinConfig.independentSwitch;
++
++  if (!independentSwitch && supportGlobalUsingComponents) {
++    return;
+   }
+   const oldJsonStr = getJsonFile(name)
+   if (oldJsonStr) { // update
+@@ -353,5 +357,7 @@ module.exports = {
+   updateComponentGenerics,
+   updateGenericComponents,
+   getChangedJsonFileMap,
+-  getSpecialMethods
++  getSpecialMethods,
++  updateJsonFile,
++  supportGlobalUsingComponents
+ }
+diff --git a/node_modules/@dcloudio/uni-cli-shared/lib/pages.js b/node_modules/@dcloudio/uni-cli-shared/lib/pages.js
+index c61f6a9..e7c391e 100644
+--- a/node_modules/@dcloudio/uni-cli-shared/lib/pages.js
++++ b/node_modules/@dcloudio/uni-cli-shared/lib/pages.js
+@@ -205,8 +205,21 @@ function parsePages (pagesJson, pageCallback, subPageCallback) {
+ }
+ 
+ function parseEntry (pagesJson) {
++  const mainJsPath = path.resolve(process.env.UNI_INPUT_DIR, getMainEntry())
+   process.UNI_ENTRY = {
+-    'common/main': path.resolve(process.env.UNI_INPUT_DIR, getMainEntry())
++    'common/main': mainJsPath
++  }
++  const manifestConfig = process.UNI_MANIFEST;
++  const weixinConfig = manifestConfig['mp-weixin'] || {};
++  const independentSwitch = !!weixinConfig.independentSwitch;
++  if (independentSwitch) {
++    Object.values(process.UNI_SUBPACKAGES).forEach(({ root, independent = false }) => {
++      if (root && independent) {
++        const pkgRootMainJsKey = `${root}/common/main`;
++        // const pkgRootMainJsPath = `${process.env.UNI_INPUT_DIR}/${root}/main.js`;
++        process.UNI_ENTRY[pkgRootMainJsKey] = mainJsPath;
++      }
++    });
+   }
+ 
+   process.UNI_SUB_PACKAGES_ROOT = {}

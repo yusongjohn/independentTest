@@ -1,0 +1,64 @@
+diff --git a/node_modules/@dcloudio/vue-cli-plugin-uni/lib/mp/index.js b/node_modules/@dcloudio/vue-cli-plugin-uni/lib/mp/index.js
+index ec8c6eb..9aa7ced 100644
+--- a/node_modules/@dcloudio/vue-cli-plugin-uni/lib/mp/index.js
++++ b/node_modules/@dcloudio/vue-cli-plugin-uni/lib/mp/index.js
+@@ -22,6 +22,8 @@ function createUniMPPlugin () {
+   return new WebpackUniMPPlugin()
+ }
+ 
++const createWxMpIndependentPlugins = require('@dcloudio/uni-mp-weixin/lib/createIndependentPlugin');
++
+ function getProvides () {
+   const uniPath = require('@dcloudio/uni-cli-shared/lib/platform').getMPRuntimePath()
+   const uniCloudPath = path.resolve(__dirname, '../../packages/uni-cloud/dist/index.js')
+@@ -169,7 +171,8 @@ module.exports = {
+     const plugins = [
+       new WebpackUniAppPlugin(),
+       createUniMPPlugin(),
+-      new webpack.ProvidePlugin(getProvides())
++      new webpack.ProvidePlugin(getProvides()),
++      ...createWxMpIndependentPlugins(),
+     ]
+ 
+     if ((process.env.UNI_SUBPACKGE || process.env.UNI_MP_PLUGIN) && process.env.UNI_SUBPACKGE !== 'main') {
+diff --git a/node_modules/@dcloudio/vue-cli-plugin-uni/lib/split-chunks.js b/node_modules/@dcloudio/vue-cli-plugin-uni/lib/split-chunks.js
+index d9b915f..b7a46ed 100644
+--- a/node_modules/@dcloudio/vue-cli-plugin-uni/lib/split-chunks.js
++++ b/node_modules/@dcloudio/vue-cli-plugin-uni/lib/split-chunks.js
+@@ -4,6 +4,13 @@ const {
+   normalizePath
+ } = require('@dcloudio/uni-cli-shared')
+ 
++const subPkgsInfo = Object.values(process.UNI_SUBPACKAGES);
++const normalFilter = ({ independent }) => !independent;
++const independentFilter = ({ independent }) => independent;
++const map2Root = ({ root }) => root + '/';
++const normalSubPackageRoots = subPkgsInfo.filter(normalFilter).map(map2Root);
++const independentSubpackageRoots = subPkgsInfo.filter(independentFilter).map(map2Root);
++
+ function createCacheGroups () {
+   const cacheGroups = {}
+   if (process.UNI_CONFUSION) { // 加密
+@@ -152,7 +159,7 @@ module.exports = function getSplitChunks () {
+   const findSubPackages = function (chunks) {
+     return chunks.reduce((pkgs, item) => {
+       const name = normalizePath(item.name)
+-      const pkgRoot = subPackageRoots.find(root => name.indexOf(root) === 0)
++      const pkgRoot = normalSubPackageRoots.find(root => name.indexOf(root) === 0)
+       pkgRoot && pkgs.add(pkgRoot)
+       return pkgs
+     }, new Set())
+@@ -178,7 +185,12 @@ module.exports = function getSplitChunks () {
+                 console.log('move module to main chunk:', module.resource,
+                   'from', subPackageRoot, 'for component in main package:', resource)
+               }
+-              return true
++              
++               // 独立分包除外
++               const independentRoot = independentSubpackageRoots.find(root => resource.indexOf(root) >= 0);
++               if (!independentRoot) {
++                 return true;
++               }
+             }
+           } else {
+             return hasMainPackageComponent(m.module, subPackageRoot)
