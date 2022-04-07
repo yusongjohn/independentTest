@@ -1,5 +1,5 @@
 diff --git a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-component.js b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-component.js
-index e52a14a..f009621 100644
+index e52a14a..91250aa 100644
 --- a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-component.js
 +++ b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-component.js
 @@ -62,6 +62,7 @@ let lastComponents = []
@@ -18,20 +18,19 @@ index e52a14a..f009621 100644
  
      Object.keys(assets).forEach(name => {
 -      if (components.has(name.replace('.js', ''))) {
-+        // 判断是不是vue
-+        const isVueComponent = components.has(name.replace('.js', ''))
-+        // 独立分包外面的组件，复制到独立分包内，在components中看不到，所以需要单独处理
-+        const isVueOuterComponent = Boolean(name.endsWith('.js') && name.indexOf(vueOuterComponentSting) >= 0)
-+        if (isVueComponent || isVueOuterComponent) {
++      // 判断是不是vue
++      const isVueComponent = components.has(name.replace('.js', ''))
++      // 独立分包外面的组件，复制到独立分包内，在components中看不到，所以需要单独处理
++      const isVueOuterComponent = Boolean(name.endsWith('.js') && name.indexOf(vueOuterComponentSting) >= 0)
++      if (isVueComponent || isVueOuterComponent) {
          curComponents.push(name.replace('.js', ''))
  
          if (assets[name].source.__$wrappered) {
-@@ -99,6 +105,16 @@ module.exports = function generateComponent (compilation, jsonpFunction = 'webpa
+@@ -99,6 +105,15 @@ module.exports = function generateComponent (compilation, jsonpFunction = 'webpa
          }
  
          const origSource = assets[name].source()
-+
-+              
++      
 +        if (isVueComponent) {
 +          componentChunkNameMap[name] = moduleId
 +        } else if (isVueOuterComponent) {
@@ -44,7 +43,7 @@ index e52a14a..f009621 100644
            const globalVar = process.env.UNI_PLATFORM === 'mp-alipay' ? 'my' : 'global'
            // 主要是为了解决支付宝旧版本， Component 方法只在组件 js 里有，需要挂在 my.defineComponent
 diff --git a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
-index 493b6f4..026fd1c 100644
+index 493b6f4..799a30a 100644
 --- a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
 +++ b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
 @@ -7,7 +7,8 @@ const {
@@ -66,7 +65,7 @@ index 493b6f4..026fd1c 100644
  function analyzeUsingComponents () {
    if (!process.env.UNI_OPT_SUBPACKAGES) {
      return
-@@ -109,9 +112,12 @@ function normalizeUsingComponents (file, usingComponents) {
+@@ -109,9 +112,11 @@ function normalizeUsingComponents (file, usingComponents) {
    return usingComponents
  }
  
@@ -75,57 +74,70 @@ index 493b6f4..026fd1c 100644
    analyzeUsingComponents()
  
 +  const emitFileMap = new Map([...cacheFileMap]);
-+
    const jsonFileMap = getChangedJsonFileMap()
    for (const name of jsonFileMap.keys()) {
      const jsonObj = JSON.parse(jsonFileMap.get(name))
-@@ -124,7 +130,7 @@ module.exports = function generateJson (compilation) {
+@@ -124,7 +129,7 @@ module.exports = function generateJson (compilation) {
      }
      delete jsonObj.customUsingComponents
      // usingGlobalComponents
 -    if (jsonObj.usingGlobalComponents && Object.keys(jsonObj.usingGlobalComponents).length) {
-+        if (!supportGlobalUsingComponents && jsonObj.usingGlobalComponents && Object.keys(jsonObj.usingGlobalComponents).length) {
++    if (!supportGlobalUsingComponents && jsonObj.usingGlobalComponents && Object.keys(jsonObj.usingGlobalComponents).length) {
        jsonObj.usingComponents = Object.assign(jsonObj.usingGlobalComponents, jsonObj.usingComponents)
      }
      delete jsonObj.usingGlobalComponents
-@@ -201,6 +207,30 @@ module.exports = function generateJson (compilation) {
+@@ -201,7 +206,39 @@ module.exports = function generateJson (compilation) {
      if ((process.env.UNI_SUBPACKGE || process.env.UNI_MP_PLUGIN) && jsonObj.usingComponents) {
        jsonObj.usingComponents = normalizeUsingComponents(name, jsonObj.usingComponents)
      }
+-    const source = JSON.stringify(jsonObj, null, 2)
 +
 +    emitFileMap.set(name, jsonObj);
 +    cacheFileMap.set(name, JSON.parse(JSON.stringify(jsonObj))); // 做一次拷贝，emitFileMap中内容在后面会被修改
 +  }
 +
-+    // 组件依赖分析
-+    (new AnalyzeDependency()).init(emitFileMap, compilation);
 +
-+    for (const [name, jsonObj] of emitFileMap) {
++  // 组件依赖分析
++  (new AnalyzeDependency()).init(emitFileMap, compilation);
++
++    for (const [name, jsonObj] of emitFileMap) {      
++      if (name === 'app.json') { // 删除manifest.json携带的配置项
++        delete jsonObj.insertAppCssToIndependentSwitch;
++        delete jsonObj.independentSwitch;
++        delete jsonObj.copyWxComponentsOnDemandSwitch;
++      } else { // 删除用于临时记录的属性
++        delete jsonObj.usingGlobalComponents;
++      }
++
 +      emit(name, jsonObj, compilation);
-+      delete jsonObj.usingGlobalComponents;
 +    }
 +
-+    if (process.env.UNI_USING_CACHE && jsonFileMap.size) {
-+      setTimeout(() => {
-+        require('@dcloudio/uni-cli-shared/lib/cache').store()
-+      }, 50)
-+    }
++  if (process.env.UNI_USING_CACHE && jsonFileMap.size) {
++    setTimeout(() => {
++      require('@dcloudio/uni-cli-shared/lib/cache').store()
++    }, 50)
++  }
 +}
 +
 +function emit (name, jsonObj, compilation) {
-+    if (jsonObj.usingComponents) {
-+      jsonObj.usingComponents = Object.assign({}, jsonObj.usingComponents);
-+    }
-     const source = JSON.stringify(jsonObj, null, 2)
++  if (jsonObj.usingComponents) {
++    jsonObj.usingComponents = Object.assign({}, jsonObj.usingComponents);
++  }
++  const source = JSON.stringify(jsonObj, null, 2)
  
      const jsFile = name.replace('.json', '.js')
-@@ -237,9 +267,3 @@ module.exports = function generateJson (compilation) {
+     if (
+@@ -235,11 +272,6 @@ module.exports = function generateJson (compilation) {
+       }
+     }
  
-     compilation.assets[name] = jsonAsset
-   }
+-    compilation.assets[name] = jsonAsset
+-  }
 -  if (process.env.UNI_USING_CACHE && jsonFileMap.size) {
 -    setTimeout(() => {
 -      require('@dcloudio/uni-cli-shared/lib/cache').store()
 -    }, 50)
 -  }
--}
++  compilation.assets[name] = jsonAsset
+ }
++
