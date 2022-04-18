@@ -1,20 +1,26 @@
 <template>
   <view class="content">
-    分包页面A
+    分包页面B
     <image class="logo" src="/static/logo.png" @click="routeToPageA"></image>
-    <view>
+    <view> 
       <text class="title">{{ title }}</text>
     </view>
+
+    <testCompo/>
   </view>
 </template>
 
 <script>
+import testCompo from './testComp'
 
 export default {
   data () {
     return {
       title: 'Hello subpackage.B',
     };
+  },
+  components:{
+    testCompo
   },
   onLoad () {
     const app = getApp()

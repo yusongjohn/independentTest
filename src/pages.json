@@ -7,9 +7,10 @@
 			}
 		}
 	],
-	"subPackages": [
+	"subPackages": [		
 		{
-			"root": "pages/subPackageA",
+			"independent": true,
+			"root": "pages/subPackageB",
 			"pages": [
 				{
 					"path": "index",
@@ -23,8 +24,7 @@
 			]
 		},
 		{
-			"independent": true,
-			"root": "pages/subPackageB",
+			"root": "pages/subPackageA",
 			"pages": [
 				{
 					"path": "index",

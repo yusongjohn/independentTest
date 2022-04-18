@@ -43,7 +43,7 @@ index e52a14a..91250aa 100644
            const globalVar = process.env.UNI_PLATFORM === 'mp-alipay' ? 'my' : 'global'
            // 主要是为了解决支付宝旧版本， Component 方法只在组件 js 里有，需要挂在 my.defineComponent
 diff --git a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
-index 493b6f4..799a30a 100644
+index 493b6f4..0cd7a61 100644
 --- a/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
 +++ b/node_modules/@dcloudio/webpack-uni-mp-loader/lib/plugin/generate-json.js
 @@ -7,7 +7,8 @@ const {
@@ -77,7 +77,7 @@ index 493b6f4..799a30a 100644
    const jsonFileMap = getChangedJsonFileMap()
    for (const name of jsonFileMap.keys()) {
      const jsonObj = JSON.parse(jsonFileMap.get(name))
-@@ -124,7 +129,7 @@ module.exports = function generateJson (compilation) {
+@@ -124,10 +129,10 @@ module.exports = function generateJson (compilation) {
      }
      delete jsonObj.customUsingComponents
      // usingGlobalComponents
@@ -85,7 +85,11 @@ index 493b6f4..799a30a 100644
 +    if (!supportGlobalUsingComponents && jsonObj.usingGlobalComponents && Object.keys(jsonObj.usingGlobalComponents).length) {
        jsonObj.usingComponents = Object.assign(jsonObj.usingGlobalComponents, jsonObj.usingComponents)
      }
-     delete jsonObj.usingGlobalComponents
+-    delete jsonObj.usingGlobalComponents
++    // delete jsonObj.usingGlobalComponents
+ 
+     // usingAutoImportComponents
+     if (jsonObj.usingAutoImportComponents && Object.keys(jsonObj.usingAutoImportComponents).length) {
 @@ -201,7 +206,39 @@ module.exports = function generateJson (compilation) {
      if ((process.env.UNI_SUBPACKGE || process.env.UNI_MP_PLUGIN) && jsonObj.usingComponents) {
        jsonObj.usingComponents = normalizeUsingComponents(name, jsonObj.usingComponents)
